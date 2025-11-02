@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PL↔ES Translator (Whisper + GPT-4o-mini + TTS)</title>
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #141922;
+    --text: #e8eef6;
+    --muted: #9fb1c7;
+    --accent: #4f8cff;
+    --accent-strong: #2f6ef0;
+    --danger: #ff5c5c;
+    --ok: #39d353;
+  }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+  }
+
+  .wrap {
+    min-height: 100%;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+
+  .card {
+    width: min(720px, 100%);
+    background: var(--panel);
+    border: 1px solid #202737;
+    border-radius: 16px;
+    padding: 20px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+  }
+
+  h1 {
+    font-size: 20px;
+    margin: 0 0 12px 0;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 18px;
+  }
+
+  .bigbtn {
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 18px 20px;
+    font-size: 18px;
+    cursor: pointer;
+    transition: transform 0.1s ease, background 0.2s ease, box-shadow 0.2s ease;
+    box-shadow: 0 6px 18px rgba(79, 140, 255, 0.35);
+  }
+  .bigbtn:hover { background: var(--accent-strong); }
+  .bigbtn:active { transform: translateY(1px); }
+  .bigbtn[disabled] {
+    opacity: 0.6;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  /* Recording pulse animation */
+  .bigbtn.recording {
+    animation: pulse 1.2s ease-in-out infinite;
+    background: #ff3b3b;
+    box-shadow: 0 6px 22px rgba(255, 59, 59, 0.4);
+  }
+  @keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.03); }
+    100% { transform: scale(1); }
+  }
+
+  .rows { display: grid; gap: 12px; margin-top: 16px; }
+  .row { background: #0f1420; border: 1px solid #1d2638; border-radius: 12px; padding: 12px; }
+  .row h3 { margin: 0 0 8px 0; font-size: 13px; color: var(--muted); font-weight: 600; letter-spacing: .2px; }
+  .row .value { white-space: pre-wrap; word-wrap: break-word; font-size: 15px; }
+
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--danger); }
+
+  .footer {
+    margin-top: 14px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  audio { width: 100%; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>PL↔ES Translator</h1>
+      <div class="subtitle">Whisper (ASR) · GPT-4o-mini (translation) · TTS (speech)</div>
+
+      <button id="toggleBtn" class="bigbtn" type="button">START</button>
+
+      <div class="rows">
+        <div class="row"><h3>Status</h3><div id="status" class="value">Ready.</div></div>
+        <div class="row"><h3>Detected language</h3><div id="language" class="value">—</div></div>
+        <div class="row"><h3>Recognized text</h3><div id="recognized" class="value">—</div></div>
+        <div class="row"><h3>Translation</h3><div id="translated" class="value">—</div></div>
+      </div>
+
+      <audio id="player" controls preload="none"></audio>
+
+      <div class="footer">Note: The API key is embedded and visible in the browser. Use locally/testing only.</div>
+    </div>
+  </div>
+
+<script>
+  // Konfiguracja API (uwaga: ekspozycja klucza w kliencie)
+  const OPENAI_API_KEY = "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";
+
+  const ENDPOINTS = {
+    whisper: "https://api.openai.com/v1/audio/transcriptions",
+    chat: "https://api.openai.com/v1/chat/completions",
+    tts: "https://api.openai.com/v1/audio/speech",
+  };
+
+  // Elementy UI
+  const btn = document.getElementById('toggleBtn');
+  const statusEl = document.getElementById('status');
+  const recognizedEl = document.getElementById('recognized');
+  const languageEl = document.getElementById('language');
+  const translatedEl = document.getElementById('translated');
+  const playerEl = document.getElementById('player');
+
+  // Stan nagrywania/przetwarzania
+  let mediaStream = null;
+  let mediaRecorder = null;
+  let chunks = [];
+  let isRecording = false;
+  let isProcessing = false;
+
+  // Reuse the same microphone stream to avoid repeated permission prompts
+  function hasActiveStream() {
+    return !!(mediaStream && mediaStream.getTracks().some(t => t.readyState === 'live'));
+  }
+
+  async function ensureStream() {
+    if (!hasActiveStream()) {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+    return mediaStream;
+  }
+
+  // Coerce Whisper language to only 'pl' or 'es' using simple heuristics
+  function coercePlOrEs(whisperLang, text) {
+    const wl = (whisperLang || '').toLowerCase();
+    if (wl === 'pl' || wl === 'polish') return 'pl';
+    if (wl === 'es' || wl === 'spa' || wl === 'spanish') return 'es';
+
+    const t = text || '';
+    const hasPlDiacritics = /[ąćęłńśźż]/i.test(t);
+    if (hasPlDiacritics) return 'pl';
+    const hasEsDiacritics = /[áéíóúüñ¡¿]/i.test(t);
+    if (hasEsDiacritics) return 'es';
+
+    // Lightweight word heuristics
+    const padded = ` ${t} `;
+    const esWords = /( el | la | de | que | y | por | para | hola | gracias | señor| señora| tú | usted | eres | estoy | soy )/i;
+    const plWords = /( i | że | nie | tak | proszę | dziękuję | cześć | jestem | masz | czy )/i;
+    if (esWords.test(padded)) return 'es';
+    if (plWords.test(padded)) return 'pl';
+
+    // Fallback: assume Polish to avoid PL->PL bug observed when defaulting ES->PL
+    return 'pl';
+  }
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.classList.remove('ok', 'err');
+    if (kind === 'ok') statusEl.classList.add('ok');
+    if (kind === 'err') statusEl.classList.add('err');
+  }
+
+  function setButtonRecordingState(recording) {
+    if (recording) {
+      btn.classList.add('recording');
+      btn.textContent = 'STOP';
+    } else {
+      btn.classList.remove('recording');
+      btn.textContent = 'START';
+    }
+  }
+
+  async function startRecording() {
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Brak wsparcia dla getUserMedia w tej przeglądarce.');
+      }
+      setStatus('Waiting for microphone permission…');
+      await ensureStream();
+      chunks = [];
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm' });
+      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      mediaRecorder.onstop = async () => {
+        try {
+          const blob = new Blob(chunks, { type: 'audio/webm' });
+          await processAudioBlob(blob);
+        } catch (err) {
+          console.error(err);
+          setStatus('Błąd podczas przetwarzania audio: ' + (err?.message || err), 'err');
+        } finally {
+          isProcessing = false;
+          btn.disabled = false;
+          setButtonRecordingState(false);
+        }
+      };
+      mediaRecorder.start();
+      isRecording = true;
+      setButtonRecordingState(true);
+      setStatus('Recording… speak now.');
+    } catch (err) {
+      console.error(err);
+      setStatus('Failed to start recording: ' + (err?.message || err), 'err');
+      isRecording = false;
+      setButtonRecordingState(false);
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && isRecording) {
+      isRecording = false;
+      isProcessing = true;
+      btn.disabled = true;
+      setStatus('Stopping recording…');
+      mediaRecorder.stop();
+    }
+  }
+
+  async function processAudioBlob(blob) {
+    recognizedEl.textContent = '—';
+    translatedEl.textContent = '—';
+    languageEl.textContent = '—';
+    playerEl.src = '';
+
+    // 1) Whisper – transcription + language detection
+    setStatus('Sending to Whisper (ASR)…');
+    const file = new File([blob], 'audio.webm', { type: 'audio/webm' });
+    const form = new FormData();
+    form.append('file', file);
+    form.append('model', 'whisper-1');
+    form.append('response_format', 'verbose_json');
+
+    const whisperResp = await fetch(ENDPOINTS.whisper, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+      body: form,
+    });
+    if (!whisperResp.ok) {
+      const msg = await safeReadError(whisperResp);
+      throw new Error('Whisper failed: ' + msg);
+    }
+    const whisperData = await whisperResp.json();
+    // whisperData: { text, language, ... }
+    const recognizedText = (whisperData?.text || '').trim();
+    const detectedLangRaw = (whisperData?.language || '').trim();
+    const coercedLang = coercePlOrEs(detectedLangRaw, recognizedText);
+    recognizedEl.textContent = recognizedText || 'none';
+    languageEl.textContent = coercedLang || 'unknown';
+    if (!recognizedText) {
+      setStatus('No speech recognized.', 'err');
+      return;
+    }
+
+    // 2) Chat Completions – translation (PL↔ES)
+    setStatus('Translating with GPT-4o-mini…');
+    const direction = (coercedLang === 'pl') ? 'PL->ES' : 'ES->PL';
+    const userMessage = `${direction === 'PL->ES' ? 'DIRECTION: PL->ES' : 'DIRECTION: ES->PL'}. Text: ${recognizedText}`;
+
+    const chatResp = await fetch(ENDPOINTS.chat, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are a translator. Reply with only the translated text.' },
+          { role: 'user', content: userMessage },
+        ],
+        temperature: 0.2,
+      }),
+    });
+    if (!chatResp.ok) {
+      const msg = await safeReadError(chatResp);
+      throw new Error('Translation failed: ' + msg);
+    }
+    const chatData = await chatResp.json();
+    const translatedText = (chatData?.choices?.[0]?.message?.content || '').trim();
+    if (!translatedText) {
+      throw new Error('Empty translation result.');
+    }
+    translatedEl.textContent = translatedText;
+
+    // 3) TTS – speech synthesis
+    setStatus('Generating speech (TTS)…');
+    const ttsResp = await fetch(ENDPOINTS.tts, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'tts-1',
+        voice: 'alloy',
+        format: 'audio/mpeg',
+        input: translatedText,
+      }),
+    });
+    if (!ttsResp.ok) {
+      const msg = await safeReadError(ttsResp);
+      throw new Error('TTS failed: ' + msg);
+    }
+
+    const ttsBlob = await ttsResp.blob();
+    const ttsUrl = URL.createObjectURL(ttsBlob);
+    playerEl.src = ttsUrl;
+    try {
+      await playerEl.play();
+      setStatus('Playing translation…', 'ok');
+    } catch {
+      setStatus('Ready. Click play to listen.', 'ok');
+    }
+  }
+
+  async function safeReadError(resp) {
+    try {
+      const text = await resp.text();
+      return text || resp.status + ' ' + resp.statusText;
+    } catch {
+      return resp.status + ' ' + resp.statusText;
+    }
+  }
+
+  btn.addEventListener('click', async () => {
+    if (isProcessing) return; // ochrona przed wielokrotnymi kliknięciami
+    if (!isRecording) {
+      await startRecording();
+    } else {
+      stopRecording();
+    }
+  });
+
+  // Clean up microphone when leaving the page
+  window.addEventListener('beforeunload', () => {
+    try {
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+      }
+    } catch {}
+  });
+</script>
+</body>
+</html>
