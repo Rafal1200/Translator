@@ -127,7 +127,7 @@
 
 <script>
   // Public config for GitHub Pages + proxy backend (no OpenAI key on client)
-  const API_BASE = "https://MOJ-BACKEND.onrender.com"; // no trailing slash
+  const API_BASE = "https://translator-backend-vzz0.onrender.com"; // no trailing slash
 
   // Elementy UI
   const btn = document.getElementById('toggleBtn');
@@ -251,7 +251,8 @@
     setStatus('Sending audio for transcription…');
     const file = new File([blob], 'audio.webm', { type: 'audio/webm' });
     const form = new FormData();
-    form.append('file', file);
+    // backend oczekuje pola "audio"
+    form.append('audio', file);
 
     const transcribeResp = await fetch(`${API_BASE}/api/transcribe`, {
       method: 'POST',
