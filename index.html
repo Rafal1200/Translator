@@ -183,13 +183,11 @@
 
   // Choose first supported MIME type for recording
   function pickRecordingType() {
-    const preferred = [
-      'audio/webm',
-      'audio/mp4',
-      'audio/m4a',
-      'audio/ogg',
-      'audio/wav',
-    ];
+    const ios = isIOS();
+    // Prefer MP4/M4A on iOS Safari
+    const preferred = ios
+      ? ['audio/mp4', 'audio/m4a', 'audio/ogg', 'audio/webm', 'audio/wav']
+      : ['audio/webm', 'audio/mp4', 'audio/m4a', 'audio/ogg', 'audio/wav'];
     const extMap = {
       'audio/webm': 'webm',
       'audio/mp4': 'mp4',
@@ -218,6 +216,11 @@
       'audio/mpeg': 'mp3',
     };
     return map[mime] || '';
+  }
+
+  function isIOS() {
+    const ua = navigator.userAgent || navigator.vendor || window.opera || '';
+    return /iPad|iPhone|iPod/.test(ua) && !(window as any).MSStream;
   }
 
   function setStatus(text, kind) {
@@ -257,6 +260,10 @@
           // Use the chosen MIME type; if empty, rely on browser-provided blob types
           const chosenType = recordingMimeType || (chunks[0] && chunks[0].type) || '';
           const blob = new Blob(chunks, chosenType ? { type: chosenType } : undefined);
+          if (!blob || blob.size < 1024) {
+            setStatus('No audio captured. Please try again.', 'err');
+            return;
+          }
           await processAudioBlob(blob);
         } catch (err) {
           console.error(err);
@@ -265,6 +272,11 @@
           isProcessing = false;
           btn.disabled = false;
           setButtonRecordingState(false);
+          // iOS Safari is more reliable when the stream is released after each recording
+          if (isIOS() && mediaStream) {
+            try { mediaStream.getTracks().forEach(t => t.stop()); } catch {}
+            mediaStream = null;
+          }
         }
       };
       mediaRecorder.start();
