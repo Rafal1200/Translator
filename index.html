@@ -136,6 +136,10 @@
   const languageEl = document.getElementById('language');
   const translatedEl = document.getElementById('translated');
   const playerEl = document.getElementById('player');
+  // Web Audio boost (to make TTS louder)
+  let audioCtx = null;
+  let elementSource = null;
+  let gainNode = null;
 
   // Stan nagrywania/przetwarzania
   let mediaStream = null;
@@ -221,6 +225,27 @@
   function isIOS() {
     const ua = navigator.userAgent || navigator.vendor || window.opera || '';
     return /iPad|iPhone|iPod/.test(ua) && !('MSStream' in window);
+  }
+
+  async function ensureAudioBoost() {
+    try {
+      if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return; // Web Audio not supported
+        audioCtx = new Ctx();
+      }
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+      if (!elementSource) {
+        elementSource = audioCtx.createMediaElementSource(playerEl);
+      }
+      if (!gainNode) {
+        gainNode = audioCtx.createGain();
+        gainNode.gain.value = 2.0; // ~+6dB
+        elementSource.connect(gainNode).connect(audioCtx.destination);
+      }
+    } catch {}
   }
 
   function setStatus(text, kind) {
@@ -374,6 +399,8 @@
     const ttsUrl = URL.createObjectURL(ttsBlob);
     playerEl.src = ttsUrl;
     try {
+      playerEl.volume = 1.0; // ensure element is at max
+      await ensureAudioBoost();
       await playerEl.play();
       setStatus('Playing translation…', 'ok');
     } catch {
