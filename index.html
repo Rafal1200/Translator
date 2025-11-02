@@ -220,7 +220,7 @@
 
   function isIOS() {
     const ua = navigator.userAgent || navigator.vendor || window.opera || '';
-    return /iPad|iPhone|iPod/.test(ua) && !(window as any).MSStream;
+    return /iPad|iPhone|iPod/.test(ua) && !('MSStream' in window);
   }
 
   function setStatus(text, kind) {
