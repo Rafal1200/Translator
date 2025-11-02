@@ -143,6 +143,8 @@
   let chunks = [];
   let isRecording = false;
   let isProcessing = false;
+  let recordingMimeType = '';
+  let recordingExtension = '';
 
   // Reuse the same microphone stream to avoid repeated permission prompts
   function hasActiveStream() {
@@ -179,6 +181,45 @@
     return 'pl';
   }
 
+  // Choose first supported MIME type for recording
+  function pickRecordingType() {
+    const preferred = [
+      'audio/webm',
+      'audio/mp4',
+      'audio/m4a',
+      'audio/ogg',
+      'audio/wav',
+    ];
+    const extMap = {
+      'audio/webm': 'webm',
+      'audio/mp4': 'mp4',
+      'audio/m4a': 'm4a',
+      'audio/ogg': 'ogg',
+      'audio/wav': 'wav',
+    };
+    for (const t of preferred) {
+      try {
+        if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) {
+          return { mimeType: t, extension: extMap[t] };
+        }
+      } catch {}
+    }
+    // Fallback: let browser choose; extension will be inferred later from blob.type
+    return { mimeType: '', extension: '' };
+  }
+
+  function mimeToExt(mime) {
+    const map = {
+      'audio/webm': 'webm',
+      'audio/mp4': 'mp4',
+      'audio/m4a': 'm4a',
+      'audio/ogg': 'ogg',
+      'audio/wav': 'wav',
+      'audio/mpeg': 'mp3',
+    };
+    return map[mime] || '';
+  }
+
   function setStatus(text, kind) {
     statusEl.textContent = text;
     statusEl.classList.remove('ok', 'err');
@@ -203,12 +244,19 @@
       }
       setStatus('Waiting for microphone permission…');
       await ensureStream();
+      // pick a supported recording type per device/browser
+      const picked = pickRecordingType();
+      recordingMimeType = picked.mimeType;
+      recordingExtension = picked.extension;
       chunks = [];
-      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm' });
+      const options = recordingMimeType ? { mimeType: recordingMimeType } : undefined;
+      mediaRecorder = new MediaRecorder(mediaStream, options);
       mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
       mediaRecorder.onstop = async () => {
         try {
-          const blob = new Blob(chunks, { type: 'audio/webm' });
+          // Use the chosen MIME type; if empty, rely on browser-provided blob types
+          const chosenType = recordingMimeType || (chunks[0] && chunks[0].type) || '';
+          const blob = new Blob(chunks, chosenType ? { type: chosenType } : undefined);
           await processAudioBlob(blob);
         } catch (err) {
           console.error(err);
@@ -249,7 +297,11 @@
 
     // 1) Transcription via backend proxy + language detection
     setStatus('Sending audio for transcription…');
-    const file = new File([blob], 'audio.webm', { type: 'audio/webm' });
+    // Determine filename and type consistently
+    const effectiveType = blob.type || recordingMimeType || '';
+    const extFromMime = mimeToExt(effectiveType);
+    const effectiveExt = recordingExtension || extFromMime || 'webm';
+    const file = new File([blob], `audio.${effectiveExt}`, effectiveType ? { type: effectiveType } : undefined);
     const form = new FormData();
     // backend oczekuje pola "audio"
     form.append('audio', file);
